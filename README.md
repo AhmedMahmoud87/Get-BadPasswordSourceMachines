@@ -1,4 +1,4 @@
-# Get-BadPasswordSourceMachines
+# Get-LockoutEvents
 A PowerShell script to get the source machines of bad password from domain controllers and compare these source machines IP addresses with Exchange servers IP addresses. 
 
 If any Exchange servers included in the source machine list, It will collect IIS logs from them after your confirmation by accessing C$ share. 
