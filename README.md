@@ -4,7 +4,7 @@ A PowerShell script to get the source machines of bad password from domain contr
 If any Exchange servers included in the source machine list, It will collect IIS logs from them after your confirmation. 
 
 # Usage
-.\Get-LockoutEvents.ps1 <username> <DomainName>.
+.\Get-BadPasswordSourceMachines.ps1 <username> <DomainName>.
  
 UserName: sAMAccountName of the user account.
 DomainName: NetBIOS or FQDN of any domain in the forest.
