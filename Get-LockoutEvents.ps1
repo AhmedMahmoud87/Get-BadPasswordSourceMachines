@@ -1,12 +1,12 @@
-# Get-LockoutEvents.ps1
+﻿# Get-LockoutEvents.ps1
 # PowerShell script to assist in troubleshooting account
 # lockout issues. It can be used to collect Security Events
 # from all DCs in a given forest or domain. It collects
 # events like 4771, 4776 with error codes 0x18 and c000006a
 # respectively.
 
-# Author: Ahmed Fouad (v-ahfoua@microsoft.com)
-# Version 1.4 - March 26, 2019
+# Author: Ahmed Fouad (ahfouad@microsoft.com)
+# Version 1.4.1 - April 21, 2019
 
 
 #region Parameters 
@@ -154,6 +154,28 @@ foreach ($dc in $Dcs)
 {
 
 $serverName = $dc.HostName
+Write-Host "Checking audits on $sererName" -ForegroundColor Green 
+
+Invoke-Command  -ComputerName $serverName -ScriptBlock {
+ 
+   $i = 0  
+   [string]$KerberosAuthenticationService = auditpol /get /subcategory:"Kerberos Authentication Service"
+   [string]$CredentialValidation =  auditpol /get /subcategory:"Credential Validation" 
+   [string]$Logon =  auditpol /get /subcategory:"Logon"     
+   if (!$KerberosAuthenticationService.Contains("Failure")) {Write-Host "Warning: Kerberos Authentication Service audit not enabled" -ForegroundColor DarkYellow; $i++ }
+   if (!$CredentialValidation.Contains("Failure")) {Write-Host "Warning: Credential Validation audit not enabled" -ForegroundColor DarkYellow ; $i++ }
+   if (!$CredentialValidation.Contains("Failure")) {Write-Host "Warning: Logon audit not enabled" -ForegroundColor DarkYellow ; $i++ }  
+   if ($i -gt 0)
+   { 
+       Write-Host "Appropriate audits are not enabled. Please enable all required audits and then run the script again after repro the issue" -ForegroundColor Red
+       exit
+           
+   }
+  
+  }  
+
+
+
 
 
 Write-Host "Checking connectivity to:" $serverName 
