@@ -6,77 +6,16 @@
 # respectively.
 
 # Author: Ahmed Fouad (ahfouad@microsoft.com)
-# Version 1.4.1 - April 21, 2019
-
-
-#region Parameters 
+# Version 1.5 - November 2, 2020
 
 Param(
     [Parameter(Mandatory = $True)] $UserName,
-    [Parameter(Mandatory = $True)] $DomainName 
+    [Parameter(Mandatory = $True)] $DomainName
+
 )
 
-#endregion 
+#region initial checks
 
-
-#region Check domain and user variables
-try 
-{
-  Write-Host "Checking whether domain" $DomainName "exist or not" 
-  if (Get-ADDomain $DomainName) 
-   {
-    Write-Host "Domain" $DomainName "already exist" -fore Green
-   }
-
-}
-
-
-catch 
-{
-
- write-host $_.Exception.Message -fore Red
- break 
-
-}
-
-
-#check whether the user exist or not
-try
-{
-   Write-Host "Checking whether AD user" $UserName "exist or not" 
-   if (Get-ADUser -Identity $UserName -Server $DomainName) 
-    {
-     Write-Host "AD user" $UserName "already exist in" $DomainName "domain" -fore Green
-    }
-}
-
-catch 
-{
-
-write-host  $_.Exception.Message -fore Red
-break 
-
-
-}
-
-write-host "check whethe the current user has domain admin previlige or not" 
-
-if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole("$DomainName\Domain Admins") -and  (-not  ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole("Enterprise Admins") ) ) 
-  {
-
-    write-host "Sorry you don't have domain admin previliege to run this script" -fore Red
-    Break
-  }
-
-Else 
-  {
-    write-host "User" $UserName "is member of $DomainName\Domain Admins" -fore Green
-    
-  }
-
-#endregion
-
-#region Set the variables
 $Dcs = Get-ADDomainController -Filter * -Server $DomainName
 
 [xml]$xmlfilter = "<QueryList> 
@@ -117,6 +56,62 @@ $Dcs = Get-ADDomainController -Filter * -Server $DomainName
 
 </QueryList>"
 
+try 
+{
+  Write-Host "Checking whether domain" $DomainName "exist or not" 
+  if (Get-ADDomain $DomainName) 
+   {
+    Write-Host "Domain" $DomainName "already exist" -fore Green
+   }
+
+}
+
+
+catch 
+{
+
+ write-host $_.Exception.Message -fore Red
+ break 
+
+}
+
+
+try
+{
+   Write-Host "Checking whether AD user" $UserName "exist or not" 
+   if (Get-ADUser -Identity $UserName -Server $DomainName) 
+    {
+     Write-Host "AD user" $UserName "already exist in" $DomainName "domain" -fore Green
+    }
+}
+
+catch 
+{
+
+write-host  $_.Exception.Message -fore Red
+break 
+
+
+}
+
+write-host "check whethe the current user has domain admin previlige or not" 
+
+if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole("$DomainName\Domain Admins") -and  (-not  ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole("Enterprise Admins") ) ) 
+  {
+
+    write-host "Sorry you don't have domain admin previliege to run this script" -fore Red
+    Break
+  }
+
+Else 
+  {
+    write-host "User" $UserName "is member of $DomainName\Domain Admins" -fore Green
+    
+  }
+
+
+
+
 $reportpath = read-host "Please enter the path of the report (leave it blank to use the default path)"
 
 if ($reportpath)
@@ -135,8 +130,7 @@ $CSVPath = $fullpath + "\LockoutLogs\Report.csv"
 
 $ExchangeServers = Get-ADGroup -Identity "Exchange Servers" |Get-ADGroupMember | ? {$_.objectClass -eq "Computer"}
 
-$AllEvents = @()
-$SourceMachines = @()
+
 $ExchangeServersIPv4 = @()
 
 foreach ($ExchangeServer in $ExchangeServers ) 
@@ -148,16 +142,71 @@ foreach ($ExchangeServer in $ExchangeServers )
 #endregion 
 
 
-#region get events from all domain controllers
 
-foreach ($dc in $Dcs)
+function Get-Events 
+{ 
+
+Param ($DomainControllers, [string]$EnableNetLogon,$UserName)
+
+$AllEvents = @()
+$SourceMachines = @()
+$servers = @()
+
+#region Get events with monitoring mode
+
+if ($EnableNetLogon -eq "True" )
+{
+
+Write-Host "Disable netlogon on all DCs" -ForegroundColor Green 
+
+foreach ($dc in $DomainControllers)
+{
+
+Invoke-Command -ComputerName $dc -ScriptBlock { param ($EnableNetLogon)
+if ($EnableNetLogon -eq "True" ) 
+   {
+   Nltest /DBFlag:0x0
+   }
+
+} -ArgumentList $EnableNetLogon
+} 
+
+Write-Host "Check domain controllers with bad passwords" -ForegroundColor Green 
+foreach ($dc in $DomainControllers)
 {
 
 $serverName = $dc.HostName
-Write-Host "Checking audits on $sererName" -ForegroundColor Green 
+$DomainControllersWithBadPWD = Invoke-Command -ComputerName $serverName -ScriptBlock  { param ($UserName)
 
-Invoke-Command  -ComputerName $serverName -ScriptBlock {
- 
+
+ if ((Get-ADUser -Identity $UserName -Properties  badpwdcount).badpwdcount -gt 0 ) 
+    {
+       return "True" 
+     
+    }
+
+} -ArgumentList $UserName
+
+if ($DomainControllersWithBadPWD -eq "True")
+{
+
+  $servers += $serverName 
+
+} 
+
+
+
+}
+
+
+foreach ($dc in $servers)
+{
+
+
+
+Write-Host "Checking audits on $dc" -ForegroundColor Green 
+
+$AuditEnabled = Invoke-Command  -ComputerName $dc -ScriptBlock { param ($EnableNetLogon)   
    $i = 0  
    [string]$KerberosAuthenticationService = auditpol /get /subcategory:"Kerberos Authentication Service"
    [string]$CredentialValidation =  auditpol /get /subcategory:"Credential Validation" 
@@ -168,14 +217,127 @@ Invoke-Command  -ComputerName $serverName -ScriptBlock {
    if ($i -gt 0)
    { 
        Write-Host "Appropriate audits are not enabled. Please enable all required audits and then run the script again after repro the issue" -ForegroundColor Red
-       exit
+       Return "False"
            
    }
+
+    if ($i -lt 1 )
+     {
+      Return "True"
+     }
   
-  }  
+  } -ArgumentList  $EnableNetLogon
+
+  if ($AuditEnabled -eq "False")
+  {
+   exit
+  }
+
+
+Write-Host "Checking connectivity to:" $dc 
+
+$PingStatus = gwmi win32_pingStatus -Filter "Address = '$dc'"
+
+if ($PingStatus.StatusCode -eq 0)
+    {  
+      Write-Host $dc  " is Online" -fore Green
+      Write-Host "Collecting logs from:" $dc
+      $Events = get-winevent -FilterXml $xmlfilter -ComputerName $dc -ErrorAction SilentlyContinue  
+      foreach ($event in $events)
+      {
+       $eventxml = [xml]$event.ToXml()
+
+       if ($event.Id -eq "4771")
+         {
+          $ipv4 = ($eventxml.Event.EventData.Data[6].'#text').Split(":")
+          $myObject = New-Object System.Object
+          $myObject | Add-Member -type NoteProperty -name "Source Machine" -Value  $ipv4[($ipv4.length -1 )]
+          $myObject | Add-Member -type NoteProperty -name "Event ID" -Value "4771"
+          $SourceMachines += $myObject
+         } 
+       if ($event.Id -eq "4776")
+         {
+          $ipv4 = Resolve-DnsName ($eventxml.Event.EventData.Data[2].'#text')
+          $myObject = New-Object System.Object
+          $myObject | Add-Member -type NoteProperty -name "Source Machine" -Value $ipv4.IPAddress
+          $myObject | Add-Member -type NoteProperty -name "Event ID" -Value "4776"
+          $SourceMachines += $myObject
+           
+         }
+
+       if ($event.Id -eq "4625")
+         {
+          $ipv4 = Resolve-DnsName ($eventxml.Event.EventData.Data[2].'#text')
+          $myObject = New-Object System.Object
+          $myObject | Add-Member -type NoteProperty -name "Source Machine" -Value  $ipv4.IPAddress
+          $myObject | Add-Member -type NoteProperty -name "Event ID" -Value "4625"
+          $SourceMachines += $myObject
+           
+         }
+      
+      }
+      write-host "Found"  $Events.count "Events on" $dc "for" $UserName -BackgroundColor Red
+      $AllEvents += $Events
+    }
+
+Else 
+   {
+     Write-Host $dc  " is offline" -fore Red
+   }
+
+   if ( $EnableNetLogon -eq "True")
+     {
+      [string]$netlogon = $dc + "_Netlogon.log"
+      Copy-Item -Path \\$dc\c$\Windows\Debug\netlogon.log -Destination "$fullpath\LockoutLogs\$netlogon" -Force -InformationAction SilentlyContinue
+     }
+}
+
+
+}
+
+#endregion 
+
+#region get event wirthout monitoring mode
 
 
 
+if ($EnableNetLogon -ne "True")
+
+{
+
+foreach ($dc in $DomainControllers)
+{
+
+$serverName = $dc.Name
+
+Write-Host "Checking audits on $serverName" -ForegroundColor Green 
+
+$AuditEnabled = Invoke-Command  -ComputerName $serverName -ScriptBlock { param ($EnableNetLogon)   
+   $i = 0  
+   [string]$KerberosAuthenticationService = auditpol /get /subcategory:"Kerberos Authentication Service"
+   [string]$CredentialValidation =  auditpol /get /subcategory:"Credential Validation" 
+   [string]$Logon =  auditpol /get /subcategory:"Logon"     
+   if (!$KerberosAuthenticationService.Contains("Failure")) {Write-Host "Warning: Kerberos Authentication Service audit not enabled" -ForegroundColor DarkYellow; $i++ }
+   if (!$CredentialValidation.Contains("Failure")) {Write-Host "Warning: Credential Validation audit not enabled" -ForegroundColor DarkYellow ; $i++ }
+   if (!$CredentialValidation.Contains("Failure")) {Write-Host "Warning: Logon audit not enabled" -ForegroundColor DarkYellow ; $i++ }  
+   if ($i -gt 0)
+   { 
+       Write-Host "Appropriate audits are not enabled. Please enable all required audits and then run the script again after repro the issue" -ForegroundColor Red
+       Return "False"
+           
+   }
+
+    if ($i -lt 1 )
+     {
+      Return "True"
+     }
+  
+  } -ArgumentList  $EnableNetLogon
+
+  if ($AuditEnabled -eq "False")
+  {
+   exit
+  }
 
 
 Write-Host "Checking connectivity to:" $serverName 
@@ -184,7 +346,7 @@ $PingStatus = gwmi win32_pingStatus -Filter "Address = '$serverName'"
 
 if ($PingStatus.StatusCode -eq 0)
     {  
-      Write-Host $serverName  " is Online" -fore Green
+      Write-Host $dc  " is Online" -fore Green
       Write-Host "Collecting logs from:" $serverName
       $Events = get-winevent -FilterXml $xmlfilter -ComputerName $serverName -ErrorAction SilentlyContinue  
       foreach ($event in $events)
@@ -232,8 +394,11 @@ Else
 
 }
 
-#endregion 
+}
 
+
+
+#endregion 
 
 #region save the report 
 
@@ -282,6 +447,100 @@ if ($SourceMachines.Count -gt 0 )
        }     
   }     
 
+
+exit 
+
 #endregion 
+
+}
+
+
+
+
+
+#region Monitor lockout
+
+function monitor-event
+{
+
+Param ($DomainControllers)
+
+
+Write-Host "Enabling Netlogon Debug on all DCs" -ForegroundColor Green 
+foreach ($dc in $DomainControllers)
+ {
+   
+   $serverName = $dc.HostName
+   
+   Invoke-Command -ComputerName $serverName -ScriptBlock {Nltest /DBFlag:2080FFFF}
+
+ }
+
+
+
+$time = 120000
+$Trigger = "False"
+
+$xml =  "<QueryList>
+  <Query Id='0' Path='Security'>
+    <Select Path='Security'>*[System[(EventID=4740) and TimeCreated[timediff(@SystemTime) &lt;= $time]]]
+    and 
+    *[EventData[Data[@Name='TargetUserName'] and (Data='$username')]] 
+
+    </Select>
+  </Query>
+</QueryList>"
+
+
+while ( $Trigger -eq "False") 
+  {
+    Write-host "Monitoring Account lockout event for $username"  -ForegroundColor Green  
+    Start-Sleep -Seconds 60 
+    $Events = Get-WinEvent -FilterXml $xml -ErrorAction SilentlyContinue 
+    if ($Events.Properties.Count -gt 0) 
+     {
+      Get-Events -DomainControllers $Dcs -EnableNetLogon "True" -UserName $username
+     }
+
+  } 
+  exit 
+} 
+#endregion
+
+#region main script
+
+
+
+$Monitor = read-host "`nDo you want to wait for next lockout (Yes/No)" 
+         while ("yes","no","y","n" -notcontains $Monitor )
+         {
+            $Monitor = read-host "`nDo you want to wait for next lockout (Yes/No)"
+         } 
+         
+          if ($Monitor -eq "yes" -or $Monitor -eq "y")
+          {
+             
+             monitor-event -DomainControllers $dcs 
+          
+          }
+
+          if ($Monitor -eq "No" -or $Monitor -eq "n")
+
+          {
+                          
+             Get-Events -DomainControllers $dcs -EnableNetLogon "False" -UserName $UserName
+              
+          }
+
+#endregion 
+
+
+
+
+
+
+
+ 
+
 
 
