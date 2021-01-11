@@ -6,13 +6,16 @@
 # respectively.
 
 # Author: Ahmed Fouad (ahfouad@microsoft.com)
-# Version 1.5 - November 2, 2020
+# Version 1.6 - January 11, 2021
 
 Param(
     [Parameter(Mandatory = $True)] $UserName,
     [Parameter(Mandatory = $True)] $DomainName
 
 )
+
+$RootDSE = Get-ADRootDSE -Server $DomainName 
+$lockoutThreshold = (Get-ADObject $RootDSE.defaultNamingContext -Property lockoutThreshold).lockoutThreshold
 
 #region initial checks
 
@@ -157,6 +160,7 @@ $servers = @()
 if ($EnableNetLogon -eq "True" )
 {
 
+
 Write-Host "Disable netlogon on all DCs" -ForegroundColor Green 
 
 foreach ($dc in $DomainControllers)
@@ -210,10 +214,12 @@ $AuditEnabled = Invoke-Command  -ComputerName $dc -ScriptBlock { param ($EnableN
    $i = 0  
    [string]$KerberosAuthenticationService = auditpol /get /subcategory:"Kerberos Authentication Service"
    [string]$CredentialValidation =  auditpol /get /subcategory:"Credential Validation" 
-   [string]$Logon =  auditpol /get /subcategory:"Logon"     
+   [string]$Logon =  auditpol /get /subcategory:"Logon"
+   [string]$AccountManagement =  auditpol /get /subcategory:"User Account Management"     
    if (!$KerberosAuthenticationService.Contains("Failure")) {Write-Host "Warning: Kerberos Authentication Service audit not enabled" -ForegroundColor DarkYellow; $i++ }
    if (!$CredentialValidation.Contains("Failure")) {Write-Host "Warning: Credential Validation audit not enabled" -ForegroundColor DarkYellow ; $i++ }
-   if (!$CredentialValidation.Contains("Failure")) {Write-Host "Warning: Logon audit not enabled" -ForegroundColor DarkYellow ; $i++ }  
+   if (!$Logon.Contains("Failure")) {Write-Host "Warning: Logon audit not enabled" -ForegroundColor DarkYellow ; $i++ } 
+   if (!$AccountManagement.Contains("Failure")) {Write-Host "Warning: User Account Management audit not enabled" -ForegroundColor DarkYellow ; $i++ }
    if ($i -gt 0)
    { 
        Write-Host "Appropriate audits are not enabled. Please enable all required audits and then run the script again after repro the issue" -ForegroundColor Red
@@ -290,6 +296,21 @@ Else
       [string]$netlogon = $dc + "_Netlogon.log"
       Copy-Item -Path \\$dc\c$\Windows\Debug\netlogon.log -Destination "$fullpath\LockoutLogs\$netlogon" -Force -InformationAction SilentlyContinue
      }
+
+$BadPWDInfo = Get-ADUser -Identity $UserName -Properties badpwdcount,badpasswordtime | select badpwdcount,badpasswordtime 
+$RootDSE = Get-ADRootDSE -Server $DomainName 
+$lockoutThreshold = (Get-ADObject $RootDSE.defaultNamingContext -Property lockoutThreshold).lockoutThreshold
+$BadPWDInformation = @()
+[string] $threshold = $lockoutThreshold
+[string]$BadCount = $BadPWDInfo.badpwdcount
+[string]$BadTime = [DateTime]::FromFileTime($user.badpasswordtime)
+$BadPWDInformation | Add-Member -MemberType NoteProperty -Name LockoutThreshold -Value $threshold
+$BadPWDInformation | Add-Member -MemberType NoteProperty -Name BadPasswordCount -Value $BadCount
+$BadPWDInformation | Add-Member -MemberType NoteProperty -Name BadPasswordtime -Value $BadTime
+
+[string]$BadPWDInformationfile = $serverName + "_BadPWDInformation.txt"
+$BadPWDInformation | out-file -FilePath "$fullpath\LockoutLogs\$BadPWDInformationfile"
+
 }
 
 
@@ -316,10 +337,12 @@ $AuditEnabled = Invoke-Command  -ComputerName $serverName -ScriptBlock { param (
    $i = 0  
    [string]$KerberosAuthenticationService = auditpol /get /subcategory:"Kerberos Authentication Service"
    [string]$CredentialValidation =  auditpol /get /subcategory:"Credential Validation" 
-   [string]$Logon =  auditpol /get /subcategory:"Logon"     
+   [string]$Logon =  auditpol /get /subcategory:"Logon"
+   [string]$AccountManagement =  auditpol /get /subcategory:"User Account Management"     
    if (!$KerberosAuthenticationService.Contains("Failure")) {Write-Host "Warning: Kerberos Authentication Service audit not enabled" -ForegroundColor DarkYellow; $i++ }
    if (!$CredentialValidation.Contains("Failure")) {Write-Host "Warning: Credential Validation audit not enabled" -ForegroundColor DarkYellow ; $i++ }
-   if (!$CredentialValidation.Contains("Failure")) {Write-Host "Warning: Logon audit not enabled" -ForegroundColor DarkYellow ; $i++ }  
+   if (!$CredentialValidation.Contains("Failure")) {Write-Host "Warning: Logon audit not enabled" -ForegroundColor DarkYellow ; $i++ } 
+   if (!$AccountManagement.Contains("Failure")) {Write-Host "Warning: User Account Management audit not enabled" -ForegroundColor DarkYellow ; $i++ } 
    if ($i -gt 0)
    { 
        Write-Host "Appropriate audits are not enabled. Please enable all required audits and then run the script again after repro the issue" -ForegroundColor Red
@@ -346,7 +369,7 @@ $PingStatus = gwmi win32_pingStatus -Filter "Address = '$serverName'"
 
 if ($PingStatus.StatusCode -eq 0)
     {  
-      Write-Host $dc  " is Online" -fore Green
+      Write-Host $serverName  " is Online" -fore Green
       Write-Host "Collecting logs from:" $serverName
       $Events = get-winevent -FilterXml $xmlfilter -ComputerName $serverName -ErrorAction SilentlyContinue  
       foreach ($event in $events)
@@ -390,6 +413,43 @@ Else
    {
      Write-Host $serverName  " is offline" -fore Red
    }
+
+Write-Host "Check whether netlogon enabled or not" -ForegroundColor Green 
+
+  $netlogonenabled =  Invoke-Command -ComputerName $serverName -ScriptBlock { 
+     $DBFlag = (Get-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters -Name DBflag | select DBflag).DBFlag 
+     if ($DBFlag -eq "0x2080ffff")
+       {
+         return "True"
+       
+       }
+
+
+   }
+
+if ($netlogonenabled -eq "True" )
+
+{
+ Write-Host "Netlogon enabled: Collectng netlogon.log file" -ForegroundColor Green 
+[string]$netlogon = $serverName + "_Netlogon.log"
+Copy-Item -Path \\$serverName\c$\Windows\Debug\netlogon.log -Destination "$fullpath\LockoutLogs\$netlogon" -Force -InformationAction SilentlyContinue
+
+}
+
+$BadPWDInfo = Get-ADUser -Identity $UserName -Properties badpwdcount,badpasswordtime | select badpwdcount,badpasswordtime 
+$RootDSE = Get-ADRootDSE -Server $DomainName 
+$lockoutThreshold = (Get-ADObject $RootDSE.defaultNamingContext -Property lockoutThreshold).lockoutThreshold
+$BadPWDInformation = New-Object -TypeName PSObject
+[string] $threshold = $lockoutThreshold
+[string]$BadTime = [DateTime]::FromFileTime($user.badpasswordtime)
+[string]$BadCount = $BadPWDInfo.badpwdcount
+$BadPWDInformation | Add-Member -MemberType NoteProperty -Name LockoutThreshold -Value $threshold
+$BadPWDInformation | Add-Member -MemberType NoteProperty -Name BadPasswordCount -Value $BadCount
+$BadPWDInformation | Add-Member -MemberType NoteProperty -Name BadPasswordtime -Value $BadTime
+
+[string]$BadPWDInformationfile = $serverName + "_BadPWDInformation.txt"
+$BadPWDInformation | out-file -FilePath "$fullpath\LockoutLogs\$BadPWDInformationfile"
+$BadPWDInformation
 
 
 }
@@ -465,8 +525,54 @@ function monitor-event
 
 Param ($DomainControllers)
 
+Write-Host "Check whether the current DC is the PDCEmulator or not" -ForegroundColor Green
+$currentDCName = [System.Net.Dns]::GetHostByName($env:computerName).hostname
+$PDCEmulator = (Get-ADDomain | select PDCEmulator).PDCEmulator
+if ($currentDCName -ne $PDCEmulator)
+{
+ Write-Host "This DC is not the PDCEmulator. Please run the sript from the PDCEmulator domain controller." -ForegroundColor Red
 
-Write-Host "Enabling Netlogon Debug on all DCs" -ForegroundColor Green 
+ exit
+
+}
+
+foreach ($dc in $DomainControllers)
+{
+$serverName = $dc.HostName
+Write-Host "Checking audits on $serverName" -ForegroundColor Green 
+
+$AuditEnabled = Invoke-Command  -ComputerName $serverName -ScriptBlock { param ($EnableNetLogon)   
+   $i = 0  
+   [string]$KerberosAuthenticationService = auditpol /get /subcategory:"Kerberos Authentication Service"
+   [string]$CredentialValidation =  auditpol /get /subcategory:"Credential Validation" 
+   [string]$Logon =  auditpol /get /subcategory:"Logon"
+   [string]$AccountManagement =  auditpol /get /subcategory:"User Account Management"     
+   if (!$KerberosAuthenticationService.Contains("Failure")) {Write-Host "Warning: Kerberos Authentication Service audit not enabled" -ForegroundColor DarkYellow; $i++ }
+   if (!$CredentialValidation.Contains("Failure")) {Write-Host "Warning: Credential Validation audit not enabled" -ForegroundColor DarkYellow ; $i++ }
+   if (!$Logon.Contains("Failure")) {Write-Host "Warning: Logon audit not enabled" -ForegroundColor DarkYellow ; $i++ } 
+   if (!$AccountManagement.Contains("Failure")) {Write-Host "Warning: User Account Management audit not enabled" -ForegroundColor DarkYellow ; $i++ }
+   if ($i -gt 0)
+   { 
+       Write-Host "Appropriate audits are not enabled. Please enable all required audits and then run the script again after repro the issue" -ForegroundColor Red
+       Return "False"
+           
+   }
+
+    if ($i -lt 1 )
+     {
+      Return "True"
+     }
+  
+  } -ArgumentList  $EnableNetLogon
+
+  if ($AuditEnabled -eq "False")
+  {
+   exit
+  }
+
+}
+
+Write-Host "Enabling Netlogon Debug on all $serverName" -ForegroundColor Green 
 foreach ($dc in $DomainControllers)
  {
    
