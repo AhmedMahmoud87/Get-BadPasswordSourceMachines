@@ -6,7 +6,7 @@
 # respectively.
 
 # Author: Ahmed Fouad (ahfouad@microsoft.com)
-# Version 1.6 - January 11, 2021
+# Version 1.7 - January 14, 2021
 
 Param(
     [Parameter(Mandatory = $True)] $UserName,
@@ -14,10 +14,67 @@ Param(
 
 )
 
-$RootDSE = Get-ADRootDSE -Server $DomainName 
-$lockoutThreshold = (Get-ADObject $RootDSE.defaultNamingContext -Property lockoutThreshold).lockoutThreshold
 
 #region initial checks
+
+write-host "check whethe the current user has domain admin previlige or not" 
+
+if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole("$DomainName\Domain Admins") -and  (-not  ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole("$DomainName\Enterprise Admins") ) ) 
+  {
+
+    write-host "Sorry you don't have domain admin previliege to run this script" -fore Red
+    Break
+  }
+
+Else 
+  {
+    write-host "User" $UserName "is member of $DomainName\Domain Admins" -fore Green
+    
+  }
+
+try 
+{
+  Write-Host "Checking whether domain" $DomainName "exist or not" 
+  if (Get-ADDomain $DomainName) 
+   {
+    Write-Host "Domain" $DomainName "already exist" -fore Green
+   }
+
+}
+
+
+catch 
+{
+
+ write-host $_.Exception.Message -fore Red
+ break 
+
+}
+
+
+try
+{
+   Write-Host "Checking whether AD user" $UserName "exist or not" 
+   if (Get-ADUser -Identity $UserName -Server $DomainName) 
+    {
+     Write-Host "AD user" $UserName "already exist in" $DomainName "domain" -fore Green
+    }
+}
+
+catch 
+{
+
+write-host  $_.Exception.Message -fore Red
+break 
+
+
+}
+
+
+
+$RootDSE = Get-ADRootDSE -Server $DomainName 
+
+$lockoutThreshold = (Get-ADObject $RootDSE.defaultNamingContext -Property lockoutThreshold).lockoutThreshold
 
 $Dcs = Get-ADDomainController -Filter * -Server $DomainName
 
@@ -59,61 +116,6 @@ $Dcs = Get-ADDomainController -Filter * -Server $DomainName
 
 </QueryList>"
 
-try 
-{
-  Write-Host "Checking whether domain" $DomainName "exist or not" 
-  if (Get-ADDomain $DomainName) 
-   {
-    Write-Host "Domain" $DomainName "already exist" -fore Green
-   }
-
-}
-
-
-catch 
-{
-
- write-host $_.Exception.Message -fore Red
- break 
-
-}
-
-
-try
-{
-   Write-Host "Checking whether AD user" $UserName "exist or not" 
-   if (Get-ADUser -Identity $UserName -Server $DomainName) 
-    {
-     Write-Host "AD user" $UserName "already exist in" $DomainName "domain" -fore Green
-    }
-}
-
-catch 
-{
-
-write-host  $_.Exception.Message -fore Red
-break 
-
-
-}
-
-write-host "check whethe the current user has domain admin previlige or not" 
-
-if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole("$DomainName\Domain Admins") -and  (-not  ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole("Enterprise Admins") ) ) 
-  {
-
-    write-host "Sorry you don't have domain admin previliege to run this script" -fore Red
-    Break
-  }
-
-Else 
-  {
-    write-host "User" $UserName "is member of $DomainName\Domain Admins" -fore Green
-    
-  }
-
-
-
 
 $reportpath = read-host "Please enter the path of the report (leave it blank to use the default path)"
 
@@ -131,17 +133,32 @@ Else
 
 $CSVPath = $fullpath + "\LockoutLogs\Report.csv" 
 
-$ExchangeServers = Get-ADGroup -Identity "Exchange Servers" |Get-ADGroupMember | ? {$_.objectClass -eq "Computer"}
+Write-Host "Get Exchange servrs" -ForegroundColor Green
 
-
-$ExchangeServersIPv4 = @()
-
-foreach ($ExchangeServer in $ExchangeServers ) 
+try 
 {
-   $ExchangeServersIPv4 += (Resolve-DnsName $ExchangeServer.name).IPAddress
+$ExchangeServers = Get-ADGroup -Identity "Exchange Servers" -ErrorAction SilentlyContinue |Get-ADGroupMember -ErrorAction SilentlyContinue | ? {$_.objectClass -eq "Computer"}
+}
+
+
+catch
+{
+ write-host "There's no Exchange servers" -ForegroundColor Red
+ $NoExchangeServers = "True" 
 
 }
 
+if ($NoExchangeServers -ne "True") 
+{
+      $ExchangeServersIPv4 = @()
+
+        foreach ($ExchangeServer in $ExchangeServers ) 
+          {
+           $ExchangeServersIPv4 += (Resolve-DnsName $ExchangeServer.name).IPAddress
+
+          }
+
+}
 #endregion 
 
 
@@ -149,7 +166,7 @@ foreach ($ExchangeServer in $ExchangeServers )
 function Get-Events 
 { 
 
-Param ($DomainControllers, [string]$EnableNetLogon,$UserName)
+Param ($DomainControllers, [string]$EnableNetLogon,$UserName,$ExchangeServersIPv4)
 
 $AllEvents = @()
 $SourceMachines = @()
@@ -158,52 +175,53 @@ $servers = @()
 #region Get events with monitoring mode
 
 if ($EnableNetLogon -eq "True" )
-{
+  {
 
+    Write-Host "Disable netlogon on all DCs" -ForegroundColor Green 
 
-Write-Host "Disable netlogon on all DCs" -ForegroundColor Green 
+    foreach ($dc in $DomainControllers)
+     {
 
-foreach ($dc in $DomainControllers)
-{
+       Invoke-Command -ComputerName $dc -ScriptBlock { param ($EnableNetLogon)
+       if ($EnableNetLogon -eq "True" ) 
+        {
+          Nltest /DBFlag:0x0
+        }
 
-Invoke-Command -ComputerName $dc -ScriptBlock { param ($EnableNetLogon)
-if ($EnableNetLogon -eq "True" ) 
-   {
-   Nltest /DBFlag:0x0
-   }
+       } -ArgumentList $EnableNetLogon
 
-} -ArgumentList $EnableNetLogon
-} 
+     } 
 
-Write-Host "Check domain controllers with bad passwords" -ForegroundColor Green 
-foreach ($dc in $DomainControllers)
-{
+     Write-Host "Check domain controllers with bad passwords" -ForegroundColor Green 
 
-$serverName = $dc.HostName
-$DomainControllersWithBadPWD = Invoke-Command -ComputerName $serverName -ScriptBlock  { param ($UserName)
+     foreach ($dc in $DomainControllers)
+     {
 
+      $serverName = $dc.HostName
+      $DomainControllersWithBadPWD = Invoke-Command -ComputerName $serverName -ScriptBlock  { param ($UserName)
 
- if ((Get-ADUser -Identity $UserName -Properties  badpwdcount).badpwdcount -gt 0 ) 
-    {
+      if ((Get-ADUser -Identity $UserName -Properties  badpwdcount).badpwdcount -gt 0 ) 
+        {
        return "True" 
      
-    }
+        }
 
-} -ArgumentList $UserName
+        } -ArgumentList $UserName
 
-if ($DomainControllersWithBadPWD -eq "True")
-{
+  if ($DomainControllersWithBadPWD -eq "True")
+  {
 
   $servers += $serverName 
 
-} 
+  } 
 
 
 
-}
+    } 
 
 
-foreach ($dc in $servers)
+
+     foreach ($dc in $servers)
 {
 
 
@@ -273,9 +291,9 @@ if ($PingStatus.StatusCode -eq 0)
 
        if ($event.Id -eq "4625")
          {
-          $ipv4 = Resolve-DnsName ($eventxml.Event.EventData.Data[2].'#text')
+          $ipv4 = $eventxml.Event.EventData.Data[19].'#text'
           $myObject = New-Object System.Object
-          $myObject | Add-Member -type NoteProperty -name "Source Machine" -Value  $ipv4.IPAddress
+          $myObject | Add-Member -type NoteProperty -name "Source Machine" -Value  $ipv4
           $myObject | Add-Member -type NoteProperty -name "Event ID" -Value "4625"
           $SourceMachines += $myObject
            
@@ -396,16 +414,16 @@ if ($PingStatus.StatusCode -eq 0)
 
        if ($event.Id -eq "4625")
          {
-          $ipv4 = Resolve-DnsName ($eventxml.Event.EventData.Data[2].'#text')
+          $ipv4 = $eventxml.Event.EventData.Data[19].'#text'
           $myObject = New-Object System.Object
-          $myObject | Add-Member -type NoteProperty -name "Source Machine" -Value  $ipv4.IPAddress
+          $myObject | Add-Member -type NoteProperty -name "Source Machine" -Value  $ipv4
           $myObject | Add-Member -type NoteProperty -name "Event ID" -Value "4625"
           $SourceMachines += $myObject
            
          }
       
       }
-      write-host "Found"  $Events.count "Events on" $serverName "for" $UserName -BackgroundColor Red
+      write-host "Found"  $Events.count "Events on" $dc "for" $UserName -BackgroundColor Red
       $AllEvents += $Events
     }
 
@@ -413,6 +431,7 @@ Else
    {
      Write-Host $serverName  " is offline" -fore Red
    }
+
 
 Write-Host "Check whether netlogon enabled or not" -ForegroundColor Green 
 
@@ -449,7 +468,7 @@ $BadPWDInformation | Add-Member -MemberType NoteProperty -Name BadPasswordtime -
 
 [string]$BadPWDInformationfile = $serverName + "_BadPWDInformation.txt"
 $BadPWDInformation | out-file -FilePath "$fullpath\LockoutLogs\$BadPWDInformationfile"
-$BadPWDInformation
+
 
 
 }
@@ -476,14 +495,17 @@ if ($SourceMachines.Count -gt 0 )
   {
 
     Write-Host "Summary of source machines for the bad password `n" -BackgroundColor Green -ForegroundColor Red
-    $SourceMachines | Group-Object "Source Machine","Event ID"  -NoElement   | Sort-Object -Property Count -Descending
+    $SourceMachines | Group-Object "Source Machine","Event ID"  -NoElement   | Sort-Object -Property Count -Descending 
 
-    $ExchangeServersIncluded = Compare-Object -ReferenceObject $SourceMachines."Source Machine"  -DifferenceObject $ExchangeServersIPv4  -IncludeEqual -ExcludeDifferent
-
+    if ($ExchangeServersIPv4.count -gt 0 ) 
+      {
+        $ExchangeServersIncluded = Compare-Object -ReferenceObject $SourceMachines."Source Machine"  -DifferenceObject $ExchangeServersIPv4  -IncludeEqual -ExcludeDifferent 
+      }
+        
      if ($ExchangeServersIncluded.InputObject.Length -gt 0 ) 
        { 
          Write-Host "`n Below Exchange Servers included in bad password source machines list `n" -BackgroundColor Green -ForegroundColor Red
-         $ExchangeServersIncluded.InputObject
+         $ExchangeServersIncluded.InputObject 
 
          $ExportExchangeLogs = read-host "`nDo you want to export IIS logs from mentioned Exchange servers (Yes/No)" 
          while ("yes","no","y","n" -notcontains $ExportExchangeLogs )
@@ -605,7 +627,7 @@ while ( $Trigger -eq "False")
     $Events = Get-WinEvent -FilterXml $xml -ErrorAction SilentlyContinue 
     if ($Events.Properties.Count -gt 0) 
      {
-      Get-Events -DomainControllers $Dcs -EnableNetLogon "True" -UserName $username
+      Get-Events -DomainControllers $Dcs -EnableNetLogon "True" -UserName $username -ExchangeServersIPv4 $ExchangeServersIPv4
      }
 
   } 
@@ -634,7 +656,7 @@ $Monitor = read-host "`nDo you want to wait for next lockout (Yes/No)"
 
           {
                           
-             Get-Events -DomainControllers $dcs -EnableNetLogon "False" -UserName $UserName
+             Get-Events -DomainControllers $dcs -EnableNetLogon "False" -UserName $UserName -ExchangeServersIPv4 $ExchangeServersIPv4
               
           }
 
